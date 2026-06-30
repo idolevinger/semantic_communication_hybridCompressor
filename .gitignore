@@ -17,8 +17,8 @@ trained_pipeline.pt
 results/*.pt
 *.pt
 
-# Experiment results (plots kept out of git)
-results/
+# Experiment results (plots are KEPT, but .pt files are ignored above)
+# (removed results/ so .png files can be tracked)
 
 # Stray nested working copy
 files (2)/
