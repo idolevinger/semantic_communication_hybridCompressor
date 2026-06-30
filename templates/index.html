@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Semantic Communication — Text Classifier</title>
+<style>
+  :root {
+    --bg: #0c0f14;
+    --panel: #151a22;
+    --panel-2: #1c232e;
+    --line: #2a333f;
+    --ink: #e8edf4;
+    --muted: #8b97a7;
+    --signal: #4fd6c2;   /* transmitted-signal teal */
+    --noise: #f0843c;    /* channel-noise amber */
+    --bar-bg: #232c38;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 48px 20px 80px; }
+
+  header { margin-bottom: 8px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--signal); margin: 0 0 10px;
+  }
+  h1 { font-size: 28px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 15px; margin: 0; }
+
+  /* pipeline diagram */
+  .pipeline {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    margin: 22px 0 28px; padding: 14px 16px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  }
+  .pipeline .node { color: var(--ink); white-space: nowrap; }
+  .pipeline .node.q { color: var(--signal); }
+  .pipeline .node.ch { color: var(--noise); }
+  .pipeline .arrow { opacity: 0.5; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 22px;
+  }
+  textarea {
+    width: 100%; min-height: 92px; resize: vertical; padding: 14px 16px;
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 10px; font-family: var(--sans); font-size: 15px;
+  }
+  textarea:focus { outline: 2px solid var(--signal); outline-offset: 1px; border-color: transparent; }
+
+  .controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+
+  /* channel toggle */
+  .toggle { display: flex; align-items: center; gap: 11px; cursor: pointer; user-select: none; }
+  .toggle input { display: none; }
+  .switch {
+    width: 46px; height: 26px; border-radius: 13px; background: var(--bar-bg);
+    border: 1px solid var(--line); position: relative; transition: background .18s;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+    border-radius: 50%; background: var(--muted); transition: transform .18s, background .18s;
+  }
+  .toggle input:checked + .switch { background: rgba(240,132,60,0.25); border-color: var(--noise); }
+  .toggle input:checked + .switch::after { transform: translateX(20px); background: var(--noise); }
+  .toggle-label { font-size: 14px; }
+  .toggle-label small { display: block; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+  button.run {
+    background: var(--signal); color: #06201c; border: none; font-weight: 650;
+    font-size: 15px; padding: 12px 26px; border-radius: 10px; cursor: pointer;
+    font-family: var(--sans); transition: filter .15s;
+  }
+  button.run:hover { filter: brightness(1.08); }
+  button.run:disabled { opacity: 0.5; cursor: default; }
+
+  /* result */
+  .result { margin-top: 24px; display: none; }
+  .result.show { display: block; animation: fade .3s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  .verdict {
+    display: flex; align-items: center; gap: 14px; padding: 16px 18px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px;
+    border-left: 3px solid var(--signal);
+  }
+  .verdict.noisy { border-left-color: var(--noise); }
+  .verdict .ico { font-size: 30px; }
+  .verdict .txt small { display: block; color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; }
+  .verdict .txt strong { font-size: 20px; font-weight: 650; }
+
+  .bars { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .bar-row { display: grid; grid-template-columns: 116px 1fr 52px; align-items: center; gap: 12px; }
+  .bar-row .name { font-size: 14px; }
+  .bar-row .name .e { margin-right: 6px; }
+  .track { height: 8px; background: var(--bar-bg); border-radius: 4px; overflow: hidden; }
+  .fill { height: 100%; width: 0; border-radius: 4px; background: var(--signal); transition: width .5s cubic-bezier(.2,.8,.2,1); }
+  .fill.noisy { background: var(--noise); }
+  .pct { font-family: var(--mono); font-size: 13px; text-align: right; color: var(--muted); }
+  .bar-row.top .name { font-weight: 650; }
+  .bar-row.top .pct { color: var(--ink); }
+
+  .err { margin-top: 16px; color: var(--noise); font-size: 14px; display: none; }
+  .err.show { display: block; }
+  footer { margin-top: 28px; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Semantic Communication</p>
+    <h1>Send a sentence through a noisy channel</h1>
+    <p class="sub">BERT embeddings are compressed, quantized to a {{ qam_order }}-QAM constellation,
+    transmitted over a simulated channel, and classified into an AG News topic.</p>
+  </header>
+
+  <div class="pipeline" aria-label="pipeline stages">
+    <span class="node">BERT</span><span class="arrow">→</span>
+    <span class="node">Autoencoder</span><span class="arrow">→</span>
+    <span class="node q">{{ qam_order }}-QAM Quantizer</span><span class="arrow">→</span>
+    <span class="node ch">AWGN Channel</span><span class="arrow">→</span>
+    <span class="node">Decoder</span><span class="arrow">→</span>
+    <span class="node">Class</span>
+  </div>
+
+  <div class="card">
+    <textarea id="sentence" placeholder="e.g. NASA launches a new telescope to study distant galaxies"></textarea>
+    <div class="controls">
+      <label class="toggle">
+        <input type="checkbox" id="noise" />
+        <span class="switch"></span>
+        <span class="toggle-label">Channel noise
+          <small>AWGN std {{ noise_std }} · ~{{ snr_db }} dB SNR</small>
+        </span>
+      </label>
+      <button class="run" id="run">Transmit &amp; classify</button>
+    </div>
+    <div class="err" id="err"></div>
+
+    <div class="result" id="result">
+      <div class="verdict" id="verdict">
+        <span class="ico" id="vIcon"></span>
+        <span class="txt"><small id="vChannel">received</small><strong id="vLabel"></strong></span>
+      </div>
+      <div class="bars" id="bars"></div>
+    </div>
+  </div>
+
+  <footer>frozen bert-base-uncased · 768→64 autoencoder · straight-through {{ qam_order }}-QAM · AWGN</footer>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const runBtn = $("run");
+
+  async function classify() {
+    const sentence = $("sentence").value.trim();
+    const noise = $("noise").checked;
+    const err = $("err");
+    err.classList.remove("show");
+
+    if (!sentence) { err.textContent = "Enter a sentence first."; err.classList.add("show"); return; }
+
+    runBtn.disabled = true; runBtn.textContent = "Transmitting…";
+    try {
+      const res = await fetch("/predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sentence, noise }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Request failed");
+      render(data);
+    } catch (e) {
+      err.textContent = e.message; err.classList.add("show");
+    } finally {
+      runBtn.disabled = false; runBtn.textContent = "Transmit & classify";
+    }
+  }
+
+  function render(data) {
+    const noisy = data.noise;
+    $("vIcon").textContent = data.icon;
+    $("vLabel").textContent = data.prediction;
+    $("vChannel").textContent = noisy ? "received over noisy channel" : "received over clean channel";
+    $("verdict").classList.toggle("noisy", noisy);
+
+    const top = Math.max(...data.scores.map((s) => s.prob));
+    const bars = $("bars");
+    bars.innerHTML = "";
+    data.scores.forEach((s) => {
+      const isTop = s.prob === top;
+      const row = document.createElement("div");
+      row.className = "bar-row" + (isTop ? " top" : "");
+      row.innerHTML =
+        `<span class="name"><span class="e">${s.icon}</span>${s.label}</span>` +
+        `<span class="track"><span class="fill ${noisy ? "noisy" : ""}"></span></span>` +
+        `<span class="pct">${s.prob}%</span>`;
+      bars.appendChild(row);
+      requestAnimationFrame(() => { row.querySelector(".fill").style.width = s.prob + "%"; });
+    });
+    $("result").classList.add("show");
+  }
+
+  runBtn.addEventListener("click", classify);
+  $("sentence").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") classify();
+  });
+</script>
+</body>
+</html>

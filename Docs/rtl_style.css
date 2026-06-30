@@ -1,0 +1,35 @@
+.markdown-body, body {
+    direction: rtl !important;
+    text-align: right !important;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
+}
+
+.markdown-body h1, 
+.markdown-body h2, 
+.markdown-body h3, 
+.markdown-body h4, 
+.markdown-body h5, 
+.markdown-body h6,
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body li {
+    direction: rtl !important;
+    text-align: right !important;
+}
+
+/* Ensure code blocks, file paths, and terminal output stay LTR */
+.markdown-body pre, 
+.markdown-body code {
+    direction: ltr !important;
+    text-align: left !important;
+}
+
+/* Align images nicely */
+.markdown-body img {
+    max-width: 100% !important;
+    height: auto !important;
+    display: block !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}

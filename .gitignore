@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS metadata
+.DS_Store
+
+# Large data files (too big for Git)
+data/
+
+# Trained model weights
+trained_pipeline.pt
+results/*.pt
+*.pt
+
+# Experiment results (plots kept out of git)
+results/
+
+# Stray nested working copy
+files (2)/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
