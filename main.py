@@ -20,6 +20,10 @@ config editing or cp commands needed.
 """
 
 import os
+import sys
+
+# snr_sweep.py lives in the Tests/ directory; make it importable from here.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tests"))
 
 import train
 import snr_sweep

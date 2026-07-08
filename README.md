@@ -1,9 +1,11 @@
 # Semantic Communication over a Noisy Channel
 
-Text classification where the **full transmission pipeline is learned end-to-end**.
+Text classification over a **learned semantic communication pipeline**.
 A sentence is BERT-encoded, compressed by a learned autoencoder, quantized onto a
 QAM constellation, sent through a simulated AWGN channel, reconstructed, and
-classified — all as a single differentiable system trained on AG News (4 classes:
+classified. Training is done in **two separate phases** — first the autoencoder
+learns to compress and reconstruct the embedding *unsupervised*, then a classifier
+is trained on top of the frozen reconstructions — on AG News (4 classes:
 World, Sports, Business, Sci/Tech).
 
 The project also implements an optional **rate-1/2 LDPC** block (inference-only) to
@@ -16,7 +18,7 @@ classical **separation approach** (a clean compressor + a classical channel code
 ## Full pipeline
 
 ```
-                         ┌─────────────── trained end-to-end ────────────────┐
+                         ┌────────────── learned in two phases ───────────────┐
                          │                                                    │
 Text ──► BERT ──► AE Encoder ──► Quantizer ──► AWGN Channel ──► AE Decoder ──► Classifier ──► Class
          (frozen)  768 → 128      soft/hard       y = x + n      128 → 768       768 → 4
@@ -25,7 +27,9 @@ Text ──► BERT ──► AE Encoder ──► Quantizer ──► AWGN Chan
                          └────────────────────────────────────────────────────┘
 ```
 
-**BERT** is frozen and pre-cached. Everything after it is trained jointly.
+**BERT** is frozen and pre-cached. Everything after it is trained in two separate
+phases — the autoencoder first (unsupervised), then the classifier on a frozen
+autoencoder. See **Training** below.
 
 The **AE Encoder** (768→128) compresses the sentence embedding and L2-normalizes
 the output so every transmitted vector has the same total power — required for
@@ -51,20 +55,38 @@ bottleneck — the system learns to recover enough semantic content to classify 
 The **Classifier** is a residual MLP (768 → 128 → 128 → 64 → 4). It reads the
 768-D reconstruction.
 
-### Training loss
+### Training (two separate phases)
+
+Training is **not end-to-end**. The autoencoder and the classifier are trained
+separately, one after the other (see `train.py`).
+
+**Phase 1 — unsupervised compression.** The AE encoder, AE decoder, and quantizer
+are trained with **no labels**, minimizing
 
 ```
-L = CrossEntropy(logits, y)
-  + 0.1 · MSE(reconstructed_embedding, original_embedding)
-  + 0.05 · KL(constellation_usage || Uniform)
+L₁ = MSE(reconstructed_embedding, original_embedding)
+   + 0.05 · KL(constellation_usage || Uniform)
 ```
 
-- **CE** — primary classification objective.
-- **MSE** — forces the AE decoder to reconstruct the original BERT embedding, keeping
-  the bottleneck semantically meaningful rather than collapsing to a pure classification
-  shortcut.
-- **KL** — regularizer that pushes the quantizer to use all constellation points roughly
-  equally, preventing mode collapse where most symbols cluster onto a few points.
+- **MSE** — the sole reconstruction objective; forces the decoder to recover the
+  original BERT embedding through the quantizer and (optionally noisy) channel.
+- **KL** — regularizer that pushes the quantizer to use all constellation points
+  roughly equally, preventing mode collapse onto a few points.
+
+Training the bottleneck without any label signal keeps the compression semantically
+pure, with no label leakage into the code. Early stopping is on validation MSE.
+
+**Phase 2 — supervised classification.** The best Phase-1 autoencoder is reloaded
+and **frozen** (`requires_grad = False`); only the classifier is trained, on the
+reconstructions produced by the frozen AE, minimizing
+
+```
+L₂ = CrossEntropy(logits, y)     # class-weighted, label-smoothed
+```
+
+The AE forward pass runs under `torch.no_grad()`, so no classification gradient
+ever reaches the encoder, decoder, or quantizer. Early stopping is on validation
+accuracy.
 
 ---
 
@@ -346,9 +368,10 @@ SNR conversion: `SNR (dB) = 10 · log₁₀(QAM_POWER / NOISE_STD²)`
 |---|---|---|
 | `BATCH_SIZE` | 128 | |
 | `LR` | 3e-4 | AdamW learning rate. |
-| `EPOCHS` | 50 | Maximum epochs before early stopping fires. |
-| `EARLY_STOP_PATIENCE` | 8 | Stop if val accuracy does not improve for this many epochs. |
-| `RECON_LOSS_WEIGHT` | 0.1 | Weight on the AE reconstruction MSE term. |
+| `EPOCHS` | 50 | Max epochs per phase before early stopping fires (Phase 1 and Phase 2 each run up to this many). |
+| `EARLY_STOP_PATIENCE` | 8 | Stop a phase if its val metric (MSE in Phase 1, accuracy in Phase 2) does not improve for this many epochs. |
+| `KL_LAMBDA` | 0.05 | Weight on the constellation-uniformity KL term in the Phase-1 loss. |
+| `RECON_LOSS_WEIGHT` | 5.0 | Legacy / unused — Phase 1 minimizes raw (unweighted) reconstruction MSE, so this constant is not read by `train.py`. |
 | `LABEL_SMOOTHING` | 0.05 | Cross-entropy label smoothing. |
 | `CLASS_WEIGHTS` | [1, 1, 1.15, 1.15] | Per-class CE weights (Business and Sci/Tech are slightly upweighted). |
 

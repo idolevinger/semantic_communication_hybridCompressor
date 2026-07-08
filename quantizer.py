@@ -134,8 +134,12 @@ class ConstellationQuantizer(nn.Module):
         # straight-through: forward uses hard, backward uses soft gradient
         out = hard + (soft - soft.detach())
 
-        # track empirical usage P_hat(C) = average soft weight per point
-        self.last_usage = weights.detach().mean(dim=(0, 1))  # (M,)
+        # track empirical usage P_hat(C) = average soft weight per point.
+        # Keep a graph-connected copy for the KL loss (so its gradient actually
+        # reaches the encoder/constellation) and a detached copy for logging.
+        usage = weights.mean(dim=(0, 1))         # (M,) -- still attached to the graph
+        self._usage_for_loss = usage
+        self.last_usage = usage.detach()         # buffer, for inspection/checkpointing
 
         return out.reshape(batch, self.bottleneck_dim)
 
@@ -151,8 +155,15 @@ class ConstellationQuantizer(nn.Module):
         return dist2.argmin(dim=-1)           # (batch, num_symbols)
 
     def kl_to_uniform(self) -> torch.Tensor:
-        """KL( P_hat(C) || Uniform ) from the most recent forward pass."""
-        p = self.last_usage.clamp_min(1e-12)
+        """KL( P_hat(C) || Uniform ) from the most recent forward pass.
+
+        Uses the graph-connected usage tensor so the KL term contributes a real
+        gradient; falls back to the detached buffer if no forward has run yet.
+        """
+        usage = getattr(self, "_usage_for_loss", None)
+        if usage is None:
+            usage = self.last_usage
+        p = usage.clamp_min(1e-12)
         p = p / p.sum()
         uniform = torch.full_like(p, 1.0 / self.order)
         return (p * (p / uniform).log()).sum()
