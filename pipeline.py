@@ -50,9 +50,10 @@ class SemanticPipeline(nn.Module):
         self.decoder = decoder
         self.ldpc_codec = ldpc_codec   # LDPCCodec instance or None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.autoencoder.encode(x)              # 768 -> bottleneck (normalized)
-
+    def _received_latent(self, z: torch.Tensor) -> torch.Tensor:
+        """Push the encoded bottleneck through the channel and return what the
+        receiver recovers. Uses the LDPC branch (eval/inference only) when a codec
+        is attached, otherwise the standard soft-quantizer + AWGN path."""
         if self.ldpc_codec is not None and not self.training:
             # LDPC path (eval/inference only — non-differentiable)
             device = z.device
@@ -64,14 +65,23 @@ class SemanticPipeline(nn.Module):
             noise_std = getattr(self.channel, 'std', 0.0)
             llrs = self.ldpc_codec.demap_to_llrs(rx, noise_std)       # (batch, n_coded_bits)
             dec_bits = self.ldpc_codec.decode(llrs)                   # (batch, n_info_bits)
-            z_received = self.ldpc_codec.bits_to_symbols(dec_bits).to(device)
-        else:
-            # Standard path (training, or eval without LDPC)
-            z = self.quantizer(z)
-            z_received = self.channel(z)
+            return self.ldpc_codec.bits_to_symbols(dec_bits).to(device)
+        # Standard path (training, or eval without LDPC)
+        z = self.quantizer(z)
+        return self.channel(z)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_with_recon(x)[0]
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Like forward(), but also returns the 768-D reconstruction x_hat so
+        callers can measure semantic distortion (MSE) alongside classification.
+        Covers both the LDPC and standard channel paths."""
+        z = self.autoencoder.encode(x)              # 768 -> bottleneck (normalized)
+        z_received = self._received_latent(z)       # through channel (+ LDPC if attached)
         x_hat = self.autoencoder.recon_decoder(z_received)  # bottleneck -> 768-D
-        return self.decoder(x_hat)                           # 768-D -> logits
+        logits = self.decoder(x_hat)                # 768-D -> logits
+        return logits, x_hat
 
     def forward_train(self, x: torch.Tensor):
         """Training path that also returns the AE reconstruction for the MSE regularizer."""

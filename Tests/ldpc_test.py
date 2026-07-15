@@ -50,9 +50,16 @@ DIM_JOINT = 64      # Option A bottleneck (joint, trained with noise)
 DIM_SEPARATE = 32   # Option B/C bottleneck (separate, trained clean)
 
 
-def _load_test_loader() -> DataLoader:
+def _load_test_loader(max_eval: int = None) -> DataLoader:
     data = torch.load(config.CACHE_EMBEDDINGS_FILE, map_location="cpu", weights_only=False)
-    ds = TensorDataset(data["test"]["embeddings"], data["test"]["labels"])
+    emb, lbl = data["test"]["embeddings"], data["test"]["labels"]
+    if max_eval is not None and max_eval < len(lbl):
+        # Deterministic subset (no shuffle) so LDPC belief-propagation, which is
+        # slow per-sample on CPU, stays tractable. All three options see the same
+        # samples, so the comparison remains fair.
+        emb, lbl = emb[:max_eval], lbl[:max_eval]
+        print(f"[INFO] Evaluating on first {max_eval} of {len(data['test']['labels'])} test samples")
+    ds = TensorDataset(emb, lbl)
     return DataLoader(ds, batch_size=config.BATCH_SIZE, shuffle=False)
 
 
@@ -61,8 +68,13 @@ def evaluate(checkpoint: str, bottleneck_dim: int, noise_std: float,
              use_ldpc: bool, device, loader: DataLoader) -> tuple:
     """Evaluate one checkpoint through a noisy channel, with or without LDPC.
 
-    Returns (overall_accuracy, [per_class_accuracy, ...]).
+    Returns (overall_accuracy, [per_class_accuracy, ...], avg_mse), where avg_mse
+    is the mean reconstruction MSE between the received 768-D signal (x_hat) and
+    the original BERT embedding — a measure of semantic distortion the channel
+    strategy leaves behind. Uses the same per-element mean convention as
+    train.evaluate_ae so the numbers are directly comparable.
     """
+    import torch.nn.functional as F
     from pipeline import build_pipeline
     pipeline = build_pipeline(
         use_noise=True,
@@ -76,9 +88,13 @@ def evaluate(checkpoint: str, bottleneck_dim: int, noise_std: float,
 
     correct = torch.zeros(config.NUM_CLASSES, dtype=torch.long)
     count = torch.zeros(config.NUM_CLASSES, dtype=torch.long)
+    mse_sum, n_samples = 0.0, 0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        preds = pipeline(x).argmax(1)
+        logits, x_hat = pipeline.forward_with_recon(x)
+        preds = logits.argmax(1)
+        mse_sum += F.mse_loss(x_hat, x).item() * x.size(0)
+        n_samples += x.size(0)
         for c in range(config.NUM_CLASSES):
             mask = y == c
             correct[c] += (preds[mask] == c).sum().item()
@@ -86,13 +102,14 @@ def evaluate(checkpoint: str, bottleneck_dim: int, noise_std: float,
 
     per_class = (correct.float() / count.float().clamp(min=1)).tolist()
     overall = (correct.sum().float() / count.sum().float()).item()
-    return overall, per_class
+    avg_mse = mse_sum / n_samples
+    return overall, per_class, avg_mse
 
 
 def _plot(results, noise_std, snr_db, out_dir):
-    """results: list of dicts with keys name, overall, per_class, color."""
+    """results: list of dicts with keys name, overall, per_class, mse, color."""
     plot_path = os.path.join(out_dir, "ldpc_comparison.png")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
 
     names = [r["name"] for r in results]
     colors = [r["color"] for r in results]
@@ -109,7 +126,7 @@ def _plot(results, noise_std, snr_db, out_dir):
                   f"Channel: noise_std={noise_std:.3f}  (SNR ≈ {snr_db:.1f} dB)")
     ax1.grid(True, axis="y", alpha=0.3)
 
-    # ---- right: per-class grouped bars ----
+    # ---- middle: per-class grouped bars ----
     n_opt = len(results)
     n_cls = config.NUM_CLASSES
     width = 0.8 / n_opt
@@ -125,6 +142,17 @@ def _plot(results, noise_std, snr_db, out_dir):
     ax2.set_title("Per-Class Breakdown")
     ax2.grid(True, axis="y", alpha=0.3)
     ax2.legend(loc="lower left")
+
+    # ---- right: reconstruction MSE bars (lower = better) ----
+    mses = [r["mse"] for r in results]
+    bars = ax3.bar(names, mses, color=colors, edgecolor="black", linewidth=0.6)
+    for bar, val in zip(bars, mses):
+        ax3.text(bar.get_x() + bar.get_width() / 2, val, f"{val:.4f}",
+                 ha="center", va="bottom", fontweight="bold")
+    ax3.set_ylabel("Avg Reconstruction MSE  (lower = better)")
+    ax3.set_ylim([0, max(mses) * 1.2])
+    ax3.set_title("Semantic Distortion\n(received 768-D vs. original BERT)")
+    ax3.grid(True, axis="y", alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(plot_path)
@@ -143,6 +171,10 @@ def main():
                         help="Cap training epochs per phase.")
     parser.add_argument("--use_existing", type=int, choices=[0, 1], default=1,
                         help="1 = reuse existing checkpoints, 0 = force retrain.")
+    parser.add_argument("--max_eval", type=int, default=None,
+                        help="Cap the number of test samples evaluated. Useful "
+                             "because LDPC belief-propagation is slow per-sample "
+                             "on CPU. Default: full test set.")
     args = parser.parse_args()
 
     if args.epochs is not None:
@@ -166,7 +198,7 @@ def main():
     ckpt_joint = os.path.join(out_dir, f"model_joint_{DIM_JOINT}.pt")
     ckpt_separate = os.path.join(out_dir, f"model_separate_{DIM_SEPARATE}.pt")
 
-    loader = _load_test_loader()
+    loader = _load_test_loader(max_eval=args.max_eval)
 
     # ---------------------------------------------------------------
     # 1. Train Option A — JOINT, D=64, WITH noise
@@ -195,35 +227,35 @@ def main():
     print(f"\n{'='*60}\nEVALUATION  (all through noise_std={noise_std:.4f})\n{'='*60}")
 
     print("[INFO] A: joint, no LDPC ...")
-    a_overall, a_pc = evaluate(ckpt_joint, DIM_JOINT, noise_std,
-                               use_ldpc=False, device=device, loader=loader)
-    print(f"[RESULT] A (joint)          : {a_overall*100:.2f}%")
+    a_overall, a_pc, a_mse = evaluate(ckpt_joint, DIM_JOINT, noise_std,
+                                      use_ldpc=False, device=device, loader=loader)
+    print(f"[RESULT] A (joint)          : {a_overall*100:.2f}%  |  MSE {a_mse:.4f}")
 
     print("[INFO] B: separate + LDPC ... (belief propagation, may take a while)")
-    b_overall, b_pc = evaluate(ckpt_separate, DIM_SEPARATE, noise_std,
-                               use_ldpc=True, device=device, loader=loader)
-    print(f"[RESULT] B (separate + LDPC): {b_overall*100:.2f}%")
+    b_overall, b_pc, b_mse = evaluate(ckpt_separate, DIM_SEPARATE, noise_std,
+                                      use_ldpc=True, device=device, loader=loader)
+    print(f"[RESULT] B (separate + LDPC): {b_overall*100:.2f}%  |  MSE {b_mse:.4f}")
 
     print("[INFO] C: separate, no LDPC (baseline) ...")
-    c_overall, c_pc = evaluate(ckpt_separate, DIM_SEPARATE, noise_std,
-                               use_ldpc=False, device=device, loader=loader)
-    print(f"[RESULT] C (baseline)       : {c_overall*100:.2f}%")
+    c_overall, c_pc, c_mse = evaluate(ckpt_separate, DIM_SEPARATE, noise_std,
+                                      use_ldpc=False, device=device, loader=loader)
+    print(f"[RESULT] C (baseline)       : {c_overall*100:.2f}%  |  MSE {c_mse:.4f}")
 
     # ---------------------------------------------------------------
     # 4. Report + plot
     # ---------------------------------------------------------------
     results = [
-        {"name": f"A: Joint (D={DIM_JOINT})",          "overall": a_overall, "per_class": a_pc, "color": "#2f6fd6"},
-        {"name": f"B: Separate+LDPC (D={DIM_SEPARATE})", "overall": b_overall, "per_class": b_pc, "color": "#2ca25f"},
-        {"name": f"C: Baseline (D={DIM_SEPARATE})",      "overall": c_overall, "per_class": c_pc, "color": "#d62728"},
+        {"name": f"A: Joint (D={DIM_JOINT})",          "overall": a_overall, "per_class": a_pc, "mse": a_mse, "color": "#2f6fd6"},
+        {"name": f"B: Separate+LDPC (D={DIM_SEPARATE})", "overall": b_overall, "per_class": b_pc, "mse": b_mse, "color": "#2ca25f"},
+        {"name": f"C: Baseline (D={DIM_SEPARATE})",      "overall": c_overall, "per_class": c_pc, "mse": c_mse, "color": "#d62728"},
     ]
 
     print(f"\n{'='*60}\nSUMMARY  (SNR ≈ {snr_db:.2f} dB)\n{'='*60}")
-    print(f"{'Option':<28}{'Overall':>10}")
+    print(f"{'Option':<28}{'Overall':>10}{'Recon MSE':>12}")
     for r in results:
-        print(f"{r['name']:<28}{r['overall']*100:>9.2f}%")
-    print(f"\n  LDPC gain (B - C): {(b_overall - c_overall)*100:+.2f} pts")
-    print(f"  Joint vs LDPC (A - B): {(a_overall - b_overall)*100:+.2f} pts")
+        print(f"{r['name']:<28}{r['overall']*100:>9.2f}%{r['mse']:>12.4f}")
+    print(f"\n  LDPC gain (B - C):     acc {(b_overall - c_overall)*100:+.2f} pts   MSE {b_mse - c_mse:+.4f}")
+    print(f"  Joint vs LDPC (A - B): acc {(a_overall - b_overall)*100:+.2f} pts   MSE {a_mse - b_mse:+.4f}")
 
     plot_path = _plot(results, noise_std, snr_db, out_dir)
     print(f"\n[DONE] Plot saved -> {plot_path}")
