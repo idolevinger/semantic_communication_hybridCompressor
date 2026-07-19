@@ -22,8 +22,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import config
@@ -145,8 +143,8 @@ def main():
     ax.text(0.72, 0.02, "-> Noisier Channel", transform=ax.transAxes, color="gray", fontsize=9)
     plt.tight_layout()
     plt.savefig(line_path)
-    plt.close(fig)
     print(f"\n[DONE] Line plot saved -> {line_path}")
+    plt.show(block=False)
 
     # (B) Heatmap: full compression x SNR grid
     heat_path = os.path.join(out_dir, "mse_sweep_heatmap.png")
@@ -167,8 +165,8 @@ def main():
     fig.colorbar(im, ax=ax, label="MSE")
     plt.tight_layout()
     plt.savefig(heat_path)
-    plt.close(fig)
     print(f"[DONE] Heatmap saved -> {heat_path}")
+    plt.show()
 
     # Console summary table
     print("\n[SUMMARY] Reconstruction MSE (rows=dim, cols=SNR dB)")
